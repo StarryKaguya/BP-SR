@@ -1,0 +1,95 @@
+name: testSyn_PostProcessV3_NTIRE
+model_type: HATModel
+scale: 1
+num_gpu: auto  # set num_gpu: 0 for cpu mode
+manual_seed: 0
+
+tile: # use the tile mode for limited GPU memory when testing.
+  tile_size: 1024 # the higher, the more utilized GPU memory and the less performance change against the full image. must be an integer multiple of the window size.
+  tile_pad: 32 # overlapping between adjacency patches.must be an integer multiple of the window size.
+
+datasets:
+  # test_1:  # the 1st test dataset
+  #   name: NtireImage
+  #   type: NtireImageDataset
+  #   dataroot_gt: datasets/vali_HR
+  #   dataroot_lq: datasets/vali_LR
+  #   dataroot_diff: datasets/vali_Diff
+  #   io_backend:
+  #     type: disk
+    
+    # test_1:
+    #   name: WildImage
+    #   type: WildImageDataset
+    #   dataroot_gt: /opt/data/private/gzy/FaithDiff-main/wild_val_enhance
+    #   dataroot_lq: /opt/data/private/gzy/FaithDiff-main/wild_val
+    #   dataroot_diff: /opt/data/private/gzy/FaithDiff-main/wild_val_enhance
+    #   io_backend:
+    #     type: disk
+
+    # test_2:
+    #   name: NtireImage
+    #   type: NtireImageDataset
+    #   dataroot_gt: /opt/data/private/gzy/FaithDiff-main/LR_SR_enhance
+    #   dataroot_lq: /opt/data/private/gzy/FaithDiff-main/LR_SR
+    #   dataroot_diff: /opt/data/private/gzy/FaithDiff-main/LR_SR_enhance
+    #   io_backend:
+    #     type: disk
+    
+    # test_1:
+    #   name: WildImage
+    #   type: NtireImageDataset
+    #   dataroot_gt: datasets/wild_test-diff
+    #   dataroot_lq: datasets/wild_test
+    #   dataroot_diff: datasets/wild_test-diff
+    #   io_backend:
+    #     type: disk
+    test_1:
+      name: SynImage
+      type: NtireImageDataset
+      dataroot_gt: datasets/DRCT_syn_test-diff
+      dataroot_lq: datasets/DRCT_syn_test
+      dataroot_diff: datasets/DRCT_syn_test-diff
+      io_backend:
+        type: disk
+
+# network structures
+network_g:
+  type: PostProcess_V3
+  upscale: 1
+  in_chans: 3
+  img_size: 64
+  window_size: 16
+  compress_ratio: 3
+  squeeze_factor: 30
+  conv_scale: 0.01
+  overlap_ratio: 0.5
+  img_range: 1.
+  depths: [6, 6, 6]
+  embed_dim: 180
+  num_heads: [6, 6, 6]
+  mlp_ratio: 2
+  upsampler: 'pixelshuffle'
+  resi_connection: '1conv'
+
+
+# path
+path:
+  pretrain_network_g: experiments/train_PPV3_SRx1_finetune_from_NTIRE/models/net_g_330000.pth
+  strict_load_g: true
+  param_key_g: 'params_ema'
+
+# validation settings
+val:
+  save_img: true
+  suffix: ~  # add suffix to saved images, if None, use exp name
+
+  metrics:
+    psnr: # metric name, can be arbitrary
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: true
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: true
