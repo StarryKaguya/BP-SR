@@ -36,3 +36,5 @@ CUDA_VISIBLE_DEVICES=0 python baseline/test.py -opt options/test/Test_PostProces
 
 ### Results
 All visual results of BP-SR can be downloaded [here](https://drive.google.com/drive/folders/1cbT7aaKb5FCxvlnaDIMWhgYphJg9h822?usp=drive_link).
+
+pretrained weight can be downloaded [here](https://drive.google.com/file/d/1N0C01YGVzEFclERoiORE1QSF60QAHgLI/view?usp=drive_link)
