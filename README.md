@@ -31,7 +31,7 @@ We utilize 1 A6000 GPU for testing.
 Test the trained model with best performance by
 ```bash
 cd BP-SR
-CUDA_VISIBLE_DEVICES=6,7 python hat/test.py -opt options/test/Test_PostProcessV5_SRx1_NTIRE.yml
+CUDA_VISIBLE_DEVICES=0 python baseline/test.py -opt options/test/Test_PostProcessV5_SRx1_NTIRE.yml
 ```
 
 ### Results
