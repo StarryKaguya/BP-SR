@@ -1,187 +1,210 @@
-# BP-SR 技术说明（NTIRE 2025 / KwaiSR）
+# BP-SR
 
-## 1. 项目与赛题背景
+[English](README.md) | [简体中文](README_cn.md)
 
-- 赛题：**NTIRE 2025 Challenge on Short-form UGC Image Super-Resolution (4x)**（CodaLab 竞赛页）。
-- 赛程：Development 阶段开始于 **2025-02-06 23:00 UTC**，比赛结束于 **2025-03-22 16:00 UTC**。
-- 官方开发阶段评分公式（CodaLab 说明）：
-  - `Final Score = PSNR + 10*SSIM - 10*LPIPS + 0.1*MUSIQ + 10*ManIQA + 10*CLIPIQA`
-- 你参与的是 NTIRE 2025 的 **KwaiSR 赛道（Track 2）**，项目方案名为 **BP-SR**。
+BP-SR is a two-stage solution for `NTIRE 2025 / CVPR 2025 Workshops, Track 2: KwaiSR`, under the broader `NTIRE 2025 Challenge on Short-form UGC Video Quality Assessment and Enhancement`.
 
-参考链接：
-- https://codalab.lisn.upsaclay.fr/competitions/21346
-- https://lixinustc.github.io/NTIRE2025-KVQE-KwaSR-KVQ.github.io/
+The released pipeline combines:
 
----
+- `DRCT` for synthetic-data upsampling
+- `FaithDiff` for same-resolution prior generation
+- `BPSR_DualStreamCrossAttention` for dual-input post-processing refinement
 
-## 2. 命名升级（已改代码）
+Official references:
 
-为了让网络名直接体现创新点（Diffusion 引导 + 双流跨注意力），将原命名：
-- `PostProcess_V3`
+- Challenge page: https://codalab.lisn.upsaclay.fr/competitions/21346
+- Project page: https://lixinustc.github.io/NTIRE2025-KVQE-KwaSR-KVQ.github.io/
+- Challenge report: https://openaccess.thecvf.com/content/CVPR2025W/NTIRE/papers/A_Li_NTIRE_2025_Challenge_on_Short-form_UGC_Video_Quality_Assessment_and_CVPRW_2025_paper.pdf
+- KwaiSR dataset paper: https://arxiv.org/html/2504.15003v1
 
-升级为：
-- `BPSR_DualStreamCrossAttention`
+## Overview
 
-并保留兼容别名：
-- `PostProcess_V3`（防止旧权重/旧配置失效）
+Track 2 mixes two different regimes:
 
-### 已修改文件
+- synthetic paired images that behave like `4x` SR
+- wild UGC images that are already at target resolution but still visually degraded
 
-- `NTIRE2025/HAT/hat/archs/post_process_v3_arch.py`
-  - 主类改名为 `BPSR_DualStreamCrossAttention`
-  - 保留 `PostProcess_V3` 兼容别名
-- `NTIRE2025/HAT/options/train/train_PPV5_SRx1_finetune_from_NTIRE.yml`
-  - `network_g.type` 改为 `BPSR_DualStreamCrossAttention`
-- `NTIRE2025/HAT/options/train/train_PPV3_SRx1_finetune_from_NTIRE.yml`
-  - `network_g.type` 改为 `BPSR_DualStreamCrossAttention`
-- `NTIRE2025/HAT/options/test/Test_PostProcessV5_SRx1_NTIRE.yml`
-  - `network_g.type` 改为 `BPSR_DualStreamCrossAttention`
-- `NTIRE2025/HAT/options/test/Test_PostProcessV3_SRx1_NTIRE.yml`
-  - `network_g.type` 改为 `BPSR_DualStreamCrossAttention`
+According to the official KwaiSR description, the dataset contains `1800` synthetic paired images and `1900` wild low-quality images, with an `8:1:1` split. The development score is a composite objective:
 
----
+`PSNR + 10*SSIM - 10*LPIPS + 0.1*MUSIQ + 10*ManIQA + 10*CLIPIQA`
 
-## 3. BP-SR 方法总览（Diffusion 双流）
+This setting makes the task different from a standard synthetic-only super-resolution benchmark. The main challenge is to balance:
 
-BP-SR 的核心不是单网络“直接修复”，而是分成两个阶段：
+- structure fidelity
+- perceptual quality
+- robustness across synthetic and wild domains
 
-1. **Diffusion 先验生成（FaithDiff）**
-- 输入 LR 图像，利用 FaithDiff 生成增强先验图（本工程中对应 `diff` 分支图像）。
-- 输出先验图写入 `LR_Diff` 或对应验证/测试 `*_Diff` 目录。
+## Motivation
 
-2. **双流跨注意力后处理（BPSR_DualStreamCrossAttention）**
-- 将 `lq`（原始输入）与 `diff`（Diffusion 先验）拼成 5 维输入：`[N, 2, 3, H, W]`。
-- 网络执行双流跨窗口注意力融合，输出恢复图像。
+BP-SR is designed around three practical issues in KwaiSR:
 
-可理解为：
+1. Synthetic and wild inputs do not start from the same spatial setting.
+   - The original synthetic LR data are `270x480`.
+   - The target resolution is `1080x1920`.
+   - Wild images are already at `1080x1920`, but they contain realistic UGC artifacts.
 
-`LR(保真基线) + Diffusion Prior(细节先验) -> Cross-Attn Fusion -> 重建输出`
+2. Original inputs and diffusion outputs have complementary strengths.
+   - The original `lq` image preserves structure and content anchors.
+   - The diffusion-enhanced result provides stronger perceptual details, but may drift from the original signal.
 
----
+3. The official score is multi-objective rather than PSNR-only.
+   - Improving perceptual quality alone is insufficient.
+   - Improving fidelity alone is also insufficient.
 
-## 4. 你的核心创新（可直接写简历）
+## Method
 
-### 创新 1：双流输入范式（不是简单后处理）
+BP-SR is a two-stage pipeline.
 
-- 数据层面明确三元组：`(lq, diff, gt)`。
-- 训练/验证时同步读取并对齐裁剪 `lq` 与 `diff`，保证先验与原图空间一致。
-- 模型输入显式做 `torch.stack([lq, diff], dim=1)`，让网络从结构上“感知两路信息来源”。
+### Stage A: Resolution unification and prior generation
 
-### 创新 2：双向跨流注意力（Cross-stream Window Attention）
+- `DRCT` upsamples the original synthetic inputs from `270x480` to `1080x1920`.
+- `FaithDiff` preprocesses both synthetic and wild images at the same `1080x1920` resolution.
+- The FaithDiff output is stored as the `diff` branch and used as a perceptual prior.
 
-在 `WindowAttention` 中，不是单流 self-attention，而是：
+This converts the mixed-input challenge into a unified same-resolution refinement setting.
 
-- 对原图流和先验流分别建立投影：`qkv` 与 `qkv_diff`
-- 做**双向跨流匹配**：
-  - `attn_ori = q_ori @ k_diff^T`
-  - `attn_diff = q_diff @ k_ori^T`
-- 取值时也跨流：
-  - `x_ori <- attn_ori @ v_diff`
-  - `x_diff <- attn_diff @ v_ori`
+### Stage B: Dual-input post-processing refinement
 
-这使得网络不只是“拼接再卷积”，而是让两路特征在注意力域内相互校正。
+The final refinement model jointly takes:
 
-### 创新 3：轻量融合 + 残差回注
+- the original low-quality image `lq`
+- the diffusion-enhanced prior `diff`
 
-- 深层输出将两路特征拼接后用 `1x1 Conv + ReLU` 融合（`fusion_conv`）。
-- 最终输出采用残差形式回注到 `x_diff`（先验分支），增强稳定性并保留高频细节。
+and learns a same-resolution refined output.
 
-### 创新 4：面向竞赛落地的工程化细节
+The root-level implementation uses:
 
-- 支持 tile 推理（避免高分辨率 OOM）
-- 训练中启用 EMA（`ema_decay=0.999`）
-- 使用分布式训练（日志记录为 2 卡）
-- 训练与验证配置完全可复现（yml + log + checkpoints）
+- `baseline/data/bpsr_aligned_triplet_dataset.py` for aligned `lq / diff / gt` loading
+- `baseline/models/bpsr_refinement_model.py` for the `BPSRRefinementModel` training wrapper
+- `baseline/models/bpsr_inference_model.py` for validation and test
+- `baseline/archs/bpsr_dualstream_cross_attention_arch.py` for the `BPSR_DualStreamCrossAttention` backbone
 
----
+### Dual-input fusion
 
-## 5. 训练与验证配置（来自实际代码/日志）
+Both training and test wrappers explicitly stack `lq` and `diff` before forwarding them to the generator.
 
-以 `train_PPV5_SRx1_finetune_from_NTIRE.yml` 与训练日志为准：
+Inside `BPSR_DualStreamCrossAttention`, `WindowAttention` defines separate projections for the two branches and performs cross-stream interaction:
 
-- Backbone：`BPSR_DualStreamCrossAttention`（原 `PostProcess_V3`）
-- 参数量：**12,043,003 (~12.04M)**
-- 输入尺度：`scale=1`（同分辨率质量增强范式）
-- 深度配置：`depths=[6,6,6]`, `embed_dim=180`, `num_heads=[6,6,6]`, `window_size=16`
-- patch：`gt_size=192`
-- 优化器：Adam，`lr=2e-4`，`betas=(0.9, 0.99)`
-- 迭代：`total_iter=100000`
-- 损失：`CombinedLoss`
-- 训练验证指标：PSNR + LPIPS（离线验证）
+- original-stream queries attend to the diffusion branch
+- diffusion-stream queries attend to the original branch
 
-日志中记录：
-- 训练图像数：`1440`
-- 验证图像数：`7`
-- best PSNR：`26.4780 @ 35000 iter`
-- best LPIPS：`0.2739 @ 10000 iter`
+This allows the model to use diffusion priors as a controllable perceptual cue instead of directly trusting the diffusion output.
 
----
+### Why `scale = 1`
 
-## 6. 其他模型详细介绍（你方案中提到的）
+The final refinement model is configured with `scale: 1` and `upscale: 1`.
 
-### 6.1 FaithDiff（Diffusion 先验生成器）
+This is intentional:
 
-你的工程实际调用方式：
-- `FaithDiff-main/FaithDiff/create_FaithDiff_model.py`
-  - 加载 SDXL UNet
-  - 初始化 VAE encoder / information transformer / control embedding
-  - 加载 FaithDiff 权重
-  - 使用 DDPM scheduler
-- `FaithDiff-main/test_wo_llava.py`
-  - 典型推理参数：`num_inference_steps=20`, `guidance_scale=5`
-  - 支持 `start_point`、tile VAE、color fix
-  - 输出生成增强图供 BP-SR 的 `diff` 分支使用
+- `DRCT` handles synthetic 4x upsampling
+- `FaithDiff` provides same-resolution priors
+- `BPSR_DualStreamCrossAttention` focuses on same-resolution refinement
 
-FaithDiff 项目侧说明（其官方 README）：
-- 定位是 CVPR 2025 图像超分/增强方向扩散先验方法
-- 代码依赖 diffusers / SUPIR / TLC
+As a result, the final stage can spend its capacity on:
 
-### 6.2 DRCT（你提到的 DCRT，建议统一写 DRCT）
+- artifact suppression
+- perceptual detail selection
+- structure-preserving enhancement
 
-命名建议：
-- 业界与官方仓库名称是 **DRCT**（不是 DCRT）。
+instead of large-scale geometric upsampling.
 
-官方 DRCT（CVPRW/NTIRE 2024）核心点：
-- 主题是缓解 SwinIR 类网络中的信息瓶颈
-- 强调将 dense connection 引入 Transformer SR 主干以稳定信息流
+## Official Result
 
-你当前仓库里的实际使用方式：
-- 在测试配置中，`datasets/DRCT_syn_test` / `datasets/DRCT_syn_test-diff` 被用作合成测试数据目录命名
-- 这表示你有使用“DRCT 相关数据/结果域”进行验证
-- 但当前仓库未直接集成 DRCT 的训练/推理代码本体（是数据侧接入而非模型侧实现）
+According to the official Track 2 results table in the challenge report, BP-SR achieved:
 
----
+- `Objective Score = 46.4382`
+- `PSNR = 27.2520`
+- `SSIM = 0.7744`
+- `LPIPS = 0.2257`
+- `MUSIQ = 58.9467`
+- `ManIQA = 0.3387`
+- `CLIPIQA = 0.4418`
+- `Objective Rank = 7`
 
-## 7. 可放简历的项目描述（长版）
+This result is best interpreted as a competitive multi-objective submission on a realistic UGC enhancement benchmark. The LPIPS value also reflects the perceptual emphasis of the pipeline, while the final rank is determined jointly by fidelity, perceptual, and no-reference IQA metrics.
 
-`BP-SR：Diffusion先验引导的双流跨注意力图像增强框架（NTIRE 2025 KwaiSR）`
+## Repository Layout
 
-- 面向短视频 UGC 增强任务，提出并落地“FaithDiff 先验生成 + 双流跨注意力后处理”的两阶段框架。
-- 设计 `BPSR_DualStreamCrossAttention` 主干，显式建模原图流与 diffusion 先验流，在窗口注意力中实现双向跨流 Q/K/V 交互，提升细节恢复与结构一致性。
-- 构建三元组数据流水线 `(lq, diff, gt)`，并实现分布式训练、EMA、tile 推理等工程化能力，支撑高分辨率稳定推理。
-- 在本地验证中达到 `PSNR=26.4780`、`LPIPS=0.2739`（best），模型参数约 `12.04M`。
+```text
+BP-SR/
+├── baseline/
+│   ├── archs/bpsr_dualstream_cross_attention_arch.py
+│   ├── data/bpsr_aligned_triplet_dataset.py
+│   ├── models/bpsr_inference_model.py
+│   └── models/bpsr_refinement_model.py
+├── options/
+│   ├── train/train_bpsr_dualstream_refinement_ntire.yml
+│   └── test/test_bpsr_dualstream_refinement_ntire.yml
+├── FaithDiff-main/
+│   └── FaithDiff preprocessing code
+├── BP-code/
+│   └── archived competition workspace
+├── inference.py
+└── README_origin.md
+```
 
----
+Notes:
 
-## 8. 关键代码索引
+- The formal method names in the root repository are:
+  - `BPSRAlignedTripletDataset`
+  - `BPSRRefinementModel`
+  - `BPSRInferenceModel`
+  - `BPSR_DualStreamCrossAttention`
+- The legacy competition-era names are kept as compatibility aliases:
+  - `NtireImageDataset`
+  - `PPV5Model`
+  - `HATModel`
+  - `PostProcess_V3`
+- `BP-code/` is kept as an archived workspace snapshot. The root-level `baseline/` and `options/` directories are the primary code paths documented here.
 
-- 双流模型封装：`NTIRE2025/HAT/hat/models/postprocess_v5_model.py`
-- 双流主干：`NTIRE2025/HAT/hat/archs/post_process_v3_arch.py`
-- 三元组数据集：`NTIRE2025/HAT/hat/data/ntire_image_dataset.py`
-- 训练配置：`NTIRE2025/HAT/options/train/train_PPV5_SRx1_finetune_from_NTIRE.yml`
-- 测试配置：`NTIRE2025/HAT/options/test/Test_PostProcessV5_SRx1_NTIRE.yml`
-- FaithDiff 入口：`FaithDiff-main/FaithDiff/create_FaithDiff_model.py`
+## Installation
 
----
+Install PyTorch first, then:
 
-## 9. 外部参考
+```bash
+pip install -r requirements.txt
+python setup.py develop
+```
 
-- NTIRE 2025 CodaLab 页面：
-  - https://codalab.lisn.upsaclay.fr/competitions/21346
-- NTIRE 2025 项目页：
-  - https://lixinustc.github.io/NTIRE2025-KVQE-KwaSR-KVQ.github.io/
-- FaithDiff：
-  - https://github.com/jychen9811/FaithDiff
-- DRCT：
-  - https://github.com/ming053l/DRCT
+Environment dependencies listed in this repository:
 
+- `torch>=1.7`
+- `basicsr==1.3.4.9`
+- `einops`
+
+## Pre-Processed Datasets
+
+- `DRCT` is used to upsample the original synthetic datasets from `270x480` to `1080x1920`.
+- `FaithDiff` is used to preprocess both synthetic and wild datasets at the same target resolution.
+
+## Training
+
+The released training setup uses `2 x A6000`.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 python -m torch.distributed.run \
+  --nproc_per_node=2 \
+  --master_port=4321 \
+  baseline/train.py \
+  -opt options/train/train_bpsr_dualstream_refinement_ntire.yml \
+  --launcher pytorch
+```
+
+## Testing
+
+The released test setup uses `1 x A6000`.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python baseline/test.py \
+  -opt options/test/test_bpsr_dualstream_refinement_ntire.yml
+```
+
+## Weights and Visual Results
+
+- Visual results: https://drive.google.com/drive/folders/1cbT7aaKb5FCxvlnaDIMWhgYphJg9h822?usp=drive_link
+- Pretrained weight: https://drive.google.com/file/d/1N0C01YGVzEFclERoiORE1QSF60QAHgLI/view?usp=drive_link
+
+## External Components
+
+- FaithDiff: https://github.com/jychen9811/FaithDiff
+- DRCT: https://github.com/ming053l/DRCT
