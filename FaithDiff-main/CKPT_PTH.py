@@ -1,0 +1,5 @@
+LLAVA_CLIP_PATH = '/opt/data/private/tq/FaithDiff/checkpoints/CLIP_VIT'
+LLAVA_MODEL_PATH = '/opt/data/private/tq/FaithDiff/checkpoints/llava-v1.5-13b'
+SDXL_PATH = '/opt/data/private/tq/FaithDiff/checkpoints/Real_4_SDXL'
+FAITHDIFF_PATH =  '/opt/data/private/tq/FaithDiff/checkpoints/FaithDiff.bin'
+VAE_FP16_PATH = '/opt/data/private/tq/FaithDiff/checkpoints/VAE_FP16'

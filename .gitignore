@@ -1,0 +1,81 @@
+# ===== OS / Editor =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ===== Build / Packaging =====
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# ===== Virtual environments =====
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ===== Logs / Tracking =====
+*.log
+*.out
+/logs/
+/log/
+/tb_logger/
+/wandb/
+/runs/
+/HAT/tb_logger/
+
+# ===== Training / Inference artifacts =====
+/experiments/
+/results/
+/tmp/
+/checkpoints/
+/weights/
+/training_states/
+/HAT/experiments/
+/HAT/results/
+*.pth
+*.pt
+*.ckpt
+*.state
+*.onnx
+*.safetensors
+*.npy
+*.npz
+
+# ===== Dataset & large local assets =====
+/datasets/
+/data/
+/HAT/datasets/
+
+# ===== Notebook =====
+.ipynb_checkpoints/
+
+# ===== Optional: keep external repos outside this Git repo =====
+# FaithDiff-main/
+# HAT/
+
+
+/FaithDiff-main/figs/
+/FaithDiff-main/wild_val/
+/FaithDiff-main/wild_val_enhance/
+/FaithDiff-main/LR_SR/
+/FaithDiff-main/LR_SR_enhance/
+
+BP-code/results
+BP-code/experiments
+BP-code/datasets
