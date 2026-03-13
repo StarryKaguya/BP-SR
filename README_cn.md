@@ -365,7 +365,33 @@ BP-SR/
 - tile 验证逻辑
 - 验证阶段保存图像
 
-训练损失方面，公开 YAML 使用的是 `CombinedLoss`，包装器中实际调用形式为 `self.cri_pix(self.gt, self.output)`。README 在这里保持与代码一致，只说明配置与调用方式，不额外扩展未在仓库中展开的内部损失组合。
+## 训练目标
+
+BP-SR 公开配置中使用的是单一复合目标 `CombinedLoss`，在训练包装器中的调用形式为：
+
+`self.cri_pix(self.gt, self.output)`
+
+项目中实际使用的损失为：
+
+`total = 1.00 * SmoothL1 + 0.06 * Perceptual + 0.05 * Histogram + 0.50 * MS-SSIM + 0.0083 * PSNRLoss + 0.25 * Color`
+
+其中：
+
+- `SmoothL1` 用于稳定像素级回归
+- `Perceptual` 由 `VGGPerceptualLoss` 计算
+- `Histogram` 用于约束整体色调 / 分布一致性
+- `MS-SSIM` 用于强化结构相似性
+- `PSNRLoss` 用于保留保真约束
+- `ColorLoss` 用于抑制增强过程中的颜色漂移
+
+这一点很关键。BP-SR 并不是只用简单的 `L1` 或 `L2` 做重建，而是从训练目标层面显式平衡：
+
+- 像素保真
+- 感知相似性
+- 结构保持
+- 色调与颜色一致性
+
+这与 KwaiSR 的赛题设定是吻合的，因为最终成绩本来就不是由单一重建指标决定的。
 
 训练过程中的验证指标为：
 
@@ -405,6 +431,42 @@ BP-SR/
 
 - `..._testSyn_PostProcessV5_NTIRE.png`
 - `..._testWild_PostProcessV5_NTIRE.png`
+
+## 为什么这套设计适合 KwaiSR
+
+BP-SR 并不是把一个通用 restoration 模型简单套到比赛数据上，而是围绕 KwaiSR 的数据结构专门组织出来的。
+
+synthetic 和 wild 本身对应两种不同困难：
+
+- synthetic 更强调从已知退化中恢复出可信内容
+- wild 更强调在没有 paired GT 的前提下做真实感知增强
+
+BP-SR 最终能成立，依赖于三个相互配合的设计：
+
+1. `FaithDiff` 先生成感知先验
+   - 这样最终阶段不必只靠 `lq` 自己去“猜”高频细节。
+
+2. `BPSR_DualStreamCrossAttention` 不会直接照单全收 diffusion 输出
+   - 它强制原图分支和 diffusion 分支在局部窗口内相互查询、相互校正。
+   - 因此最终结果比“直接拿 diffusion 结果当输出”更可控。
+
+3. 网络学习的是“对 diffusion 先验的残差修正”
+   - 这让最终阶段更聚焦于纠偏、去伪影、补结构，而不是从头生成一张全新的图。
+   - 对同分辨率 refinement 来说，这是一个很务实的设计。
+
+损失函数和结构也是配套的：
+
+- `MS-SSIM` 与 `SmoothL1` 保证结构和内容稳定
+- `Perceptual` 与 `Histogram` 促进更自然的纹理与色调分布
+- `ColorLoss` 抑制激进增强导致的颜色偏移
+- `PSNRLoss` 让优化过程始终保留保真约束
+
+综合来看，这个项目可以被理解成一个“可控的感知增强系统”：
+
+- diffusion 提供候选细节
+- cross-stream attention 负责筛选和对齐这些细节
+- residual 输出负责修正先验
+- composite loss 则约束结果在视觉观感和保真之间取得平衡
 
 ## 模型细节
 

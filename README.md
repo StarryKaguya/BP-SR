@@ -376,7 +376,33 @@ The released training config also enables:
 - tiled validation logic
 - image saving during validation
 
-For the loss, the published config uses `CombinedLoss`. The wrapper calls it as `self.cri_pix(self.gt, self.output)`. The repository-level YAML exposes the configured loss name, while the internal composition of `CombinedLoss` is not expanded further in this README.
+## Training Objective
+
+The released BP-SR configuration uses a single composite objective through `CombinedLoss`, called in the wrapper as:
+
+`self.cri_pix(self.gt, self.output)`
+
+The actual loss used in the project is:
+
+`total = 1.00 * SmoothL1 + 0.06 * Perceptual + 0.05 * Histogram + 0.50 * MS-SSIM + 0.0083 * PSNRLoss + 0.25 * Color`
+
+where:
+
+- `SmoothL1` stabilizes pixel-level regression
+- `Perceptual` is computed by `VGGPerceptualLoss`
+- `Histogram` encourages global tone / distribution consistency
+- `MS-SSIM` enforces structural similarity
+- `PSNRLoss` keeps fidelity pressure in the optimization
+- `ColorLoss` reduces color drift across the restored image
+
+This objective is important for understanding BP-SR. The project does not rely on a plain `L1` or `L2` reconstruction target. Instead, the training signal is explicitly designed to balance:
+
+- pixel fidelity
+- perceptual similarity
+- structure preservation
+- tone and color consistency
+
+This is directly aligned with the challenge setting, where the final score is not determined by a single reconstruction metric.
 
 During training-time validation, the released config tracks:
 
@@ -416,6 +442,42 @@ This explains why archived competition outputs contain names such as:
 
 - `..._testSyn_PostProcessV5_NTIRE.png`
 - `..._testWild_PostProcessV5_NTIRE.png`
+
+## Why This Design Works For KwaiSR
+
+BP-SR is not merely a generic image-restoration model applied to a competition dataset. The released design is tightly coupled to the structure of KwaiSR.
+
+The synthetic subset and the wild subset stress different failure modes:
+
+- synthetic requires faithful recovery from a degraded but paired source
+- wild requires perceptually convincing enhancement without paired GT
+
+The final BP-SR design addresses this mismatch through three interacting choices:
+
+1. `FaithDiff` generates a perceptual prior before the final stage.
+   - This injects plausible high-frequency details that a conservative refiner would struggle to hallucinate from `lq` alone.
+
+2. `BPSR_DualStreamCrossAttention` does not blindly trust the diffusion output.
+   - It forces the original image branch and the diffusion branch to query each other inside local windows.
+   - This makes the final output more controllable than directly using the diffusion result.
+
+3. The network predicts a residual over the diffusion prior rather than a fully new image.
+   - This keeps the final stage focused on correction, cleanup, and structural adjustment.
+   - It is a pragmatic choice for same-resolution refinement.
+
+The loss complements the architecture:
+
+- `MS-SSIM` and `SmoothL1` preserve structure and content stability
+- `Perceptual` and `Histogram` encourage visually plausible textures and tonal distribution
+- `ColorLoss` suppresses color shifts introduced by aggressive enhancement
+- `PSNRLoss` keeps the optimization anchored to fidelity
+
+Taken together, the project can be understood as a controlled perceptual refinement system:
+
+- diffusion contributes candidate details
+- cross-stream attention filters and aligns those details
+- the residual output corrects the prior
+- the composite loss keeps the result visually strong without fully giving up fidelity
 
 ## Installation
 
