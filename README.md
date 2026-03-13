@@ -34,6 +34,38 @@ This setting makes the task different from a standard synthetic-only super-resol
 - perceptual quality
 - robustness across synthetic and wild domains
 
+## How To Interpret The Official Dataset
+
+The official KwaiSR benchmark should not be interpreted as a conventional paired SR dataset.
+
+- The `synthetic` subset is the paired source domain.
+  - It provides aligned `LR / HR` supervision.
+  - It behaves like a controllable `4x` restoration problem.
+
+- The `wild` subset is the unpaired real target domain.
+  - It contains only low-quality UGC images without paired GT.
+  - It is intended to measure real-domain perceptual enhancement and generalization.
+
+The challenge materials do not prescribe a single recipe for exploiting the wild subset. However, three signals are explicit:
+
+- wild images do not come with paired GT
+- the same method is expected to process both synthetic and wild inputs
+- the competition page explicitly encourages diffusion-based methods
+
+Therefore, the wild subset should be understood as unlabeled real-domain data rather than as a second supervised training set. In practice, it is suitable for:
+
+- prior generation
+- pseudo-target construction
+- self-training or consistency regularization
+- no-reference quality guidance
+- domain adaptation to real UGC artifacts
+
+The released BP-SR pipeline follows a conservative version of this logic:
+
+- supervised refinement training is performed on the paired synthetic subset
+- wild images are used for same-resolution prior generation and final inference
+- one unified refinement pipeline is applied to both domains after preprocessing
+
 ## Motivation
 
 BP-SR is designed around three practical issues in KwaiSR:
@@ -50,6 +82,10 @@ BP-SR is designed around three practical issues in KwaiSR:
 3. The official score is multi-objective rather than PSNR-only.
    - Improving perceptual quality alone is insufficient.
    - Improving fidelity alone is also insufficient.
+
+4. The wild subset cannot be used as ordinary paired supervision.
+   - There is no paired GT for wild images.
+   - The method must still generalize from synthetic supervision to real UGC inputs.
 
 ## Method
 
@@ -89,6 +125,147 @@ Inside `BPSR_DualStreamCrossAttention`, `WindowAttention` defines separate proje
 - diffusion-stream queries attend to the original branch
 
 This allows the model to use diffusion priors as a controllable perceptual cue instead of directly trusting the diffusion output.
+
+## Code-Level Pipeline
+
+The released root-level code follows the tensor flow below.
+
+### 1. Dataset construction
+
+`BPSRAlignedTripletDataset` scans three folders with identical filenames and constructs aligned triplets:
+
+- `lq_path`
+- `diff_path`
+- `gt_path`
+
+At training time, the dataset performs:
+
+- same-location random cropping on `lq`, `diff`, and `gt`
+- synchronized flip / rotation augmentation
+- optional RGB-to-Y conversion
+- tensor conversion in `RGB / CHW / float32`
+
+Because the released BP-SR configuration uses `scale: 1`, the crop size is the same for all three branches. In the provided training config, `gt_size: 192` therefore produces:
+
+- `lq`: `3 x 192 x 192`
+- `diff`: `3 x 192 x 192`
+- `gt`: `3 x 192 x 192`
+
+### 2. Wrapper-level input packing
+
+`BPSRRefinementModel.optimize_parameters()` and `BPSRInferenceModel.pre_process()` both pack the input as:
+
+`torch.stack([lq, diff], dim=1)`
+
+which gives a generator input with shape:
+
+`[B, 2, 3, H, W]`
+
+During inference, both branches are reflect-padded to a multiple of `window_size` before stacking.
+
+### 3. Shared shallow encoding
+
+Inside `BPSR_DualStreamCrossAttention.forward()`:
+
+- the dual input is mean-normalized
+- the two branches are flattened from `[B, 2, 3, H, W]` to `[2B, 3, H, W]`
+- a shared `3x3` convolution `conv_first` lifts both branches to `embed_dim`
+
+This means the model uses a shared shallow encoder for both branches, while branch interaction happens later in attention space.
+
+### 4. Deep feature extraction
+
+The released backbone uses:
+
+- `patch_size = 1`
+- `embed_dim = 180`
+- `depths = [6, 6, 6]`
+- `num_heads = [6, 6, 6]`
+- `window_size = 16`
+
+With `patch_size = 1`, tokenization preserves the native spatial resolution. The network therefore behaves as a same-resolution transformer refiner rather than a low-resolution latent model.
+
+Deep features are processed by `3` residual hybrid attention groups (`RHAG`), each containing `6` hybrid attention blocks (`HAB`), for a total of `18` attention blocks in the released configuration.
+
+### 5. Cross-stream attention
+
+`WindowAttention` is the core BP-SR interaction module.
+
+It defines separate projections for the two branches:
+
+- `qkv` for the original `lq` stream
+- `qkv_diff` for the diffusion-prior stream
+
+Inside each window, the two branches attend to each other rather than only to themselves:
+
+- `attn_ori = q_ori @ k_diff^T`
+- `attn_diff = q_diff @ k_ori^T`
+- `x_ori = attn_ori @ v_diff`
+- `x_diff = attn_diff @ v_ori`
+
+Relative position bias and shifted-window masking are still used, so the architecture preserves the HAT-style local-window inductive bias while replacing single-stream attention with dual-stream cross interaction.
+
+### 6. Local branch and block composition
+
+Each `HAB` also instantiates a `CAB` local convolutional branch for channel-aware local processing.
+
+In the released code path, the block residual update is dominated by:
+
+- cross-window attention
+- MLP refinement
+
+The `CAB` branch is computed inside the block, but the residual fusion line currently keeps the attention path active in the final update. This matches the current released implementation rather than a hypothetical ablation variant.
+
+### 7. Feature fusion and output reconstruction
+
+After deep feature extraction:
+
+- branch features are split back into original and diffusion halves
+- the two branch feature maps are concatenated along channels
+- a `1x1` fusion layer `fusion_conv` reduces `2C -> C`
+- `conv_last` projects features back to RGB
+
+The final output is formed as a residual over the original diffusion prior:
+
+`output = reconstruction + x_diff`
+
+This design is important. The network does not synthesize a fully independent image from scratch. Instead, it learns a residual correction on top of the FaithDiff-enhanced input.
+
+## Official Dataset Versus Archived Competition Workspace
+
+The root repository documents the cleaned method names and code structure. The archived `BP-code/` workspace preserves how the competition run was actually organized.
+
+In the archived workspace, the data usage can be interpreted as follows:
+
+- synthetic paired training subset
+  - `BP-code/datasets/HR`
+  - `BP-code/datasets/LR`
+  - `BP-code/datasets/LR_Diff`
+  - `1440` aligned triplets actually used for supervised refinement training
+
+- local monitoring subset
+  - `BP-code/datasets/vali_HR`
+  - `BP-code/datasets/vali_LR`
+  - `BP-code/datasets/vali_Diff`
+  - `7` locally selected validation triplets used for quick training-time monitoring
+
+- development-phase staging directories
+  - `FaithDiff-main/LR_SR` and `FaithDiff-main/LR_SR_enhance`
+  - `FaithDiff-main/wild_val` and `FaithDiff-main/wild_val_enhance`
+  - these directories correspond to preprocessed synthetic and wild inputs used during development-stage testing
+
+- final test-time directories
+  - `BP-code/datasets/DRCT_syn_test`
+  - `BP-code/datasets/DRCT_syn_test-diff`
+  - `BP-code/datasets/wild_test`
+  - `BP-code/datasets/wild_test-diff`
+  - these directories correspond to the final synthetic and wild inference sets used for challenge submission
+
+This archived layout also explains why the naming can look inconsistent:
+
+- `LR` in the archived training folders already refers to DRCT-upsampled same-resolution inputs
+- `wild_val` in the FaithDiff workspace is a historical competition-era name, not a repository-level semantic definition
+- the full official benchmark split and the locally retained competition snapshot are not identical directory trees
 
 ### Why `scale = 1`
 
@@ -156,6 +333,89 @@ Notes:
   - `HATModel`
   - `PostProcess_V3`
 - `BP-code/` is kept as an archived workspace snapshot. The root-level `baseline/` and `options/` directories are the primary code paths documented here.
+
+## Training Role Of The Wild Subset
+
+Since the official wild subset has no paired GT, the released BP-SR refinement stage does not optimize a direct supervised pixel loss on wild images.
+
+Instead, the repository reflects the following design:
+
+- `DRCT` resolves the synthetic `4x` scale mismatch
+- `FaithDiff` generates same-resolution perceptual priors for both synthetic and wild images
+- the final BP-SR refinement model is trained on aligned synthetic triplets and then applied to both domains
+
+This design choice matches the benchmark structure:
+
+- synthetic data provide stable supervision
+- wild data provide real-domain priors and evaluation targets
+- the final method must remain usable on real UGC inputs without access to paired wild GT
+
+## Training Configuration
+
+The released root-level training config is:
+
+- `options/train/train_bpsr_dualstream_refinement_ntire.yml`
+
+Key settings in the released configuration are:
+
+- `model_type: BPSRRefinementModel`
+- `network_g: BPSR_DualStreamCrossAttention`
+- `scale: 1`
+- `gt_size: 192`
+- `batch_size_per_gpu: 2`
+- `num_worker_per_gpu: 8`
+- `optimizer: Adam`
+- `lr: 2e-4`
+- `betas: [0.9, 0.99]`
+- `ema_decay: 0.999`
+- `total_iter: 100000`
+
+The released training config also enables:
+
+- `find_unused_parameters: true`
+- tiled validation logic
+- image saving during validation
+
+For the loss, the published config uses `CombinedLoss`. The wrapper calls it as `self.cri_pix(self.gt, self.output)`. The repository-level YAML exposes the configured loss name, while the internal composition of `CombinedLoss` is not expanded further in this README.
+
+During training-time validation, the released config tracks:
+
+- `PSNR`
+- `LPIPS`
+
+This is consistent with the overall motivation of balancing fidelity and perceptual quality.
+
+## Inference Details
+
+The released root-level test config is:
+
+- `options/test/test_bpsr_dualstream_refinement_ntire.yml`
+
+Important inference details:
+
+- `model_type: BPSRInferenceModel`
+- `param_key_g: params_ema`
+- `tile_size: 1024`
+- `tile_pad: 32`
+- `window_size: 16`
+- `save_img: true`
+
+Inference proceeds as:
+
+1. reflect-pad `lq` and `diff` to window-aligned spatial sizes
+2. optionally split the input into tiles for memory-safe processing
+3. merge output tiles back to a full-resolution image
+4. crop away padding
+5. save the restored image
+
+When `val.suffix` is unset, the saved filename follows:
+
+`<img_name>_<experiment_name>.png`
+
+This explains why archived competition outputs contain names such as:
+
+- `..._testSyn_PostProcessV5_NTIRE.png`
+- `..._testWild_PostProcessV5_NTIRE.png`
 
 ## Installation
 
